@@ -1,12 +1,13 @@
 #!/usr/bin/env ruby
 
 require 'socket'
+require 'zlib'
 
 # Global constants.
 $DEFAULT_PORT = 80
 $NUM_REQ_ARGS = 3
-$MAX_CACHE_SIZE = 52428800
-$MAX_OBJECT_SIZE = 1048576
+$MAX_CACHE_SIZE = 5000000
+$MAX_OBJECT_SIZE = 1000000
 $MAX_TIME = 3600
 
 # Request class that holds information to a HTTP request.
@@ -43,56 +44,64 @@ def proxy(port)
    
         # Accept the client's connect.
         Thread.start(server.accept) do |socket|
-          while line = socket.gets()
-              line_parts = line.split()
-              # Parsing the first 2 lines of the request.
-              # Check if it is a valid GET request.
-              if (line_parts[0].eql?("GET"))
-                  url = line_parts[1]
-                  request.push(line)
-                  # Check if there is a Host line.
-              elsif (line_parts[0].eql?("Host:"))
-                  request.push(line)
-                  time = Time.new()
-                  req = parse_request(request, time)
-                  # If there is a new line, we have reached the end and we get the headers.
-              elsif (line.eql?("\r\n"))
-                  header_str = parse_headers(headers)
-                  break
-                  # We keep adding the other headers into a hash map.
-              else
-                  colon_index = line.index(':')
-                  headers[line[0, colon_index + 1]] = line[colon_index + 1, line.length]
-              end
-          end
-  
-          # If there is a cache hit, we retrieve from cache.
-          if (cache.has_key?(url))
-              #puts "We have a hit!"
-              cacheObject = cache[url]
-              socket.puts(cacheObject.response)
-              # Else there is no cache hit.
-          else
-              response = openWebConn(req, header_str)
-              size = cacheSize(cache)
-              # We check if the page request exceeds 1MB. If it is, we cache the page.
-              if ((response.bytesize() <= $MAX_OBJECT_SIZE) &&
-                  (size <= $MAX_CACHE_SIZE))
-                  #puts "We have a miss!"
-                  cache[url] = CacheLine.new(url, response, time)
-                  socket.puts(response)
-                  # We check the cache size. If there is no more room for one more object,
-                  # we delete the objects that have been in the cache for one hour or 
-                  # more.
-                  if (size + $MAX_OBJECT_SIZE > $MAX_CACHE_SIZE)
-                      deleteCachedObjects(cache)
-                  end
-                  # Otherwise we don't cache the page.
-              else
-                  socket.puts(response)
-              end
-          end
-          socket.close()
+          begin
+            while line = socket.gets()
+                line_parts = line.split()
+                # Parsing the first 2 lines of the request.
+                # Check if it is a valid GET request.
+                if (line_parts[0].eql?("GET"))
+                    url = line_parts[1]
+                    request.push(line)
+                    # Check if there is a Host line.
+                elsif (line_parts[0].eql?("Host:"))
+                    request.push(line)
+                    time = Time.new()
+                    req = parse_request(request, time)
+                    # If there is a new line, we have reached the end and we get the headers.
+                elsif (line.eql?("\r\n"))
+                    header_str = parse_headers(headers)
+                    break
+                    # We keep adding the other headers into a hash map.
+                else
+                    colon_index = line.index(':')
+                    headers[line[0, colon_index + 1]] = line[colon_index + 1, line.length]
+                end
+            end
+    
+            # If there is a cache hit, we retrieve from cache.
+            if (cache.has_key?(url))
+                #puts "We have a hit!"
+                cacheObject = cache[url]
+                socket.puts(cacheObject.response)
+                # Else there is no cache hit.
+                print "Cached: " + url + "\n";
+            else
+                response = openWebConn(req, header_str)
+                size = cacheSize(cache)
+                # We check if the page request exceeds 1MB. If it is, we cache the page.
+                if ((response.bytesize() <= $MAX_OBJECT_SIZE) &&
+                    (size <= $MAX_CACHE_SIZE))
+                    #puts "We have a miss!"
+                    cache[url] = CacheLine.new(url, response, time)
+                    socket.puts(response)
+                    print "Just Cached: " + url + ". Cache free space is " + ($MAX_CACHE_SIZE - (size + response.bytesize())).to_s() + "\n";
+                    # We check the cache size. If there is no more room for one more object,
+                    # we delete the objects that have been in the cache for one hour or 
+                    # more.
+                    if (size + $MAX_OBJECT_SIZE > $MAX_CACHE_SIZE)
+                        deleteCachedObjects(cache)
+                    end
+                    # Otherwise we don't cache the page.
+                else
+                    socket.puts(response)
+                    print "Not Cached: " + url + "\n";
+                end
+            end
+          rescue Exception => details
+            print "Error: " + details + "\n"
+          ensure  
+            socket.close()
+          end  
         end
     end
 end
@@ -153,7 +162,7 @@ def parse_request(request, time)
 
     # Check if request is a HTTP request
     if (!request[0].include?(line_start))
-        abort("Malformed request line - only http requests are parsed.")
+        raise "Malformed request line - only 'http' requests are supported"
     end
 
     # Check if request conforms to METHOD URL HTTP_VERSION
@@ -162,7 +171,7 @@ def parse_request(request, time)
         # Check for 'GET' verb (kind of redundant since we checked it earlier in the
         # daryl_proxy method).
         if (!req[0].eql?"GET")
-            abort("Request is not a 'GET' request. Ignored.")
+            raise "Request is not a 'GET' request. Ignored"
         end
 
         # Look for '/' that separates hostname and URI
@@ -188,10 +197,27 @@ def parse_request(request, time)
         host = request[1]
         host = host[host_str.length(), host.length()]
         if (host.length.eql?(0))
-            abort( "Malformed request line - invalid host.")
+            raise "Malformed request line - invalid host"
         end
     end
     request = Request.new("GET", host.chomp(), port, filename, "HTTP/1.0", time)
+end
+
+# aka compress
+def deflate(string, level)
+  z = Zlib::Deflate.new(level)
+  dst = z.deflate(string, Zlib::FINISH)
+  z.close
+  dst
+end
+
+# aka decompress
+def inflate(string)
+  zstream = Zlib::Inflate.new
+  buf = zstream.inflate(string)
+  zstream.finish
+  zstream.close
+  buf
 end
 
 if __FILE__ == $0
