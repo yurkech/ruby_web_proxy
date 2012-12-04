@@ -9,6 +9,7 @@ $NUM_REQ_ARGS = 3
 $MAX_CACHE_SIZE = 5000000
 $MAX_OBJECT_SIZE = 1000000
 $MAX_TIME = 3600
+$COMPRESSION_LEVEL = 9
 
 # Request class that holds information to a HTTP request.
 class Request
@@ -25,6 +26,10 @@ class CacheLine
 
     def initialize(*args)
         @url, @response, @timestamp = *args
+    end
+    
+    def response
+      @response # simply returning an instance variable @response
     end
 end
 
@@ -72,19 +77,20 @@ def proxy(port)
             if (cache.has_key?(url))
                 #puts "We have a hit!"
                 cacheObject = cache[url]
-                socket.puts(cacheObject.response)
+                socket.puts(inflate(cacheObject.response))
                 # Else there is no cache hit.
                 print "Cached: " + url + "\n";
             else
                 response = openWebConn(req, header_str)
+                encripted_response = deflate(response, $COMPRESSION_LEVEL)
                 size = cacheSize(cache)
                 # We check if the page request exceeds 1MB. If it is, we cache the page.
-                if ((response.bytesize() <= $MAX_OBJECT_SIZE) &&
+                if ((encripted_response.bytesize() <= $MAX_OBJECT_SIZE) &&
                     (size <= $MAX_CACHE_SIZE))
                     #puts "We have a miss!"
-                    cache[url] = CacheLine.new(url, response, time)
+                    cache[url] = CacheLine.new(url, encripted_response, time)
                     socket.puts(response)
-                    print "Just Cached: " + url + ". Cache free space is " + ($MAX_CACHE_SIZE - (size + response.bytesize())).to_s() + "\n";
+                    print "Just Cached: " + url + ". Cache free space is " + ($MAX_CACHE_SIZE - (size + encripted_response.bytesize())).to_s() + "\n";
                     # We check the cache size. If there is no more room for one more object,
                     # we delete the objects that have been in the cache for one hour or 
                     # more.
@@ -205,18 +211,26 @@ end
 
 # aka compress
 def deflate(string, level)
-  z = Zlib::Deflate.new(level)
-  dst = z.deflate(string, Zlib::FINISH)
-  z.close
+  if ($COMPRESSION_LEVEL != 0)
+    z = Zlib::Deflate.new(level)
+    dst = z.deflate(string, Zlib::FINISH)
+    z.close
+  else
+    dst = string  
+  end  
   dst
 end
 
 # aka decompress
 def inflate(string)
-  zstream = Zlib::Inflate.new
-  buf = zstream.inflate(string)
-  zstream.finish
-  zstream.close
+  if ($COMPRESSION_LEVEL != 0)
+    zstream = Zlib::Inflate.new
+    buf = zstream.inflate(string)
+    zstream.finish
+    zstream.close
+  else
+    buf = string 
+  end     
   buf
 end
 
